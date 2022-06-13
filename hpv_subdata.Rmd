@@ -1,0 +1,771 @@
+---
+title: "hpv_subdata"
+author: "Si Zhou"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+
+```{r}
+library(VGAM)
+library(rtf)
+library(reshape2)
+library(ggplot2)
+library(lattice)
+library(survival)
+library(Hmisc)
+library(rms)
+library(dplyr)
+library(gtsummary)
+
+```
+
+
+```{r}
+# import dataset
+lndata = read.csv("Surgery.csv",header=T,sep=",")
+
+lndata = lndata %>% filter(!(TNM_PATH_M %in% c("c1", "p1")))
+lndata = lndata %>% filter(REGIONAL_NODES_EXAMINED<=50)
+# data year: 2004-2017
+
+dim(lndata)
+# current cohort number = 62673
+
+```
+
+
+```{r}
+# filter for ICD-O-3 codes on primary site
+# C019, C024, C142
+lndata = lndata %>% filter(cancer_type %in% c("Pharynx","Orophary"))
+# final cohort number = 1140
+
+```
+
+
+```{r}
+# EDA
+h = hist(lndata$REGIONAL_NODES_EXAMINED, main=NULL, xlab="Regional Lymph Nodes Examined",
+         col = "skyblue")
+text(h$mids,h$counts,labels=h$counts, adj=c(0.5, -0.5))
+
+g = hist(lndata$REGIONAL_NODES_POSITIVE, main=NULL, xlab="Regional Lymph Nodes Positive",
+         col = "skyblue")
+text(g$mids,g$counts,labels=g$counts, adj=c(0.5, -0.5))
+
+histogram(lndata$prob_positive, main=NULL, xlab="Probability of Node-Positive",
+         col = "skyblue")
+
+```
+
+
+```{r}
+# generate subsets for positive nodes and examined nodes >= 2
+multnod = lndata %>% filter(node_status==1) %>% filter(REGIONAL_NODES_EXAMINED >= 2)
+# cohort = 38462
+
+# subset with variables: id, nodes positive, nodes negative, and nodes examined
+multnod.lnonly = multnod %>% select(PUF_CASE_ID, REGIONAL_NODES_POSITIVE,
+                                    regional_nodes_negative, REGIONAL_NODES_EXAMINED)
+
+subdata = multnod %>% select(REGIONAL_NODES_POSITIVE,regional_nodes_negative,
+                             REGIONAL_NODES_EXAMINED)
+summary(subdata)
+
+```
+
+
+```{r}
+# Create subset of data to use for estimating alpha/betas
+col1 = multnod.lnonly$REGIONAL_NODES_POSITIVE
+col2 = multnod.lnonly$regional_nodes_negative
+totnodes = multnod.lnonly$REGIONAL_NODES_EXAMINED
+trainingdata = cbind(col1,col2)
+
+summary(trainingdata)
+
+```
+
+
+```{r}
+# fitting the beta-binomial model
+# vglm: Fits vector generalized linear models (VGLMs)
+# Parameter1: formula (model to be fit): two column matrix with success & failures
+#           each row is an observation. The use of "~ 1" indicates to fit just an intercept.
+# Parameter2: function of class vglmff describing statistical model to be used
+#           (VGAM family function = betabinomial)
+fit = vglm(trainingdata ~ 1, betabinomialff, trace = TRUE)
+head(fit@misc$rho) # The correlation parameter
+ls(fit@misc)
+head(cbind(depvar(fit), weights(fit, type = "prior")))
+fit
+summary(fit)
+Coef(fit)
+ls(predict(fit,se=TRUE))
+diag(predict(fit,se=TRUE)$se.fit)
+
+```
+
+
+```{r}
+# Calculate stderr for coefficients
+model_stderr = (diag(predict(fit,se=TRUE)$se.fit))
+
+# Report exponentiated coefficents & 95% CI
+model_coef = exp(coef(fit))
+model_mohighCI_coef = exp(coef(fit) + 1.96 * model_stderr)
+model_lowCI_coef = exp(coef(fit) - 1.96 * model_stderr)
+model_coef
+model_mohighCI_coef
+model_lowCI_coef
+
+```
+
+
+```{r}
+# result of a, b and their 95% confidence interval
+ub = model_mohighCI_coef
+lb = model_lowCI_coef
+t = t(t(Coef(fit)))
+
+ab.ci = cbind(t,t(t(lb)),t(t(ub)))
+colnames(ab.ci) = c("val","lb","ub")
+
+# 95% confidence interval for a and b
+rownames(ab.ci) = c("a","b")
+ab.ci
+
+# mean for model
+1.233925/(1.233925+7.199679)
+# 0.1463105
+
+```
+
+
+```{r}
+# calculate the proportion of nodes positive and its mean
+multnod.lnonly[,"prop.pos"] = 
+  multnod.lnonly[,"REGIONAL_NODES_POSITIVE"]/multnod.lnonly[,"REGIONAL_NODES_EXAMINED"]
+mean(multnod.lnonly[,"prop.pos"])
+# overall mean of proportion of positive is 0.1636298
+
+```
+
+
+```{r}
+a = as.numeric(Coef(fit)[1])
+b = as.numeric(Coef(fit)[2])
+beta1 = beta(a,b)
+beta1
+# 0.06239312
+
+# equation 5
+xvec = seq(1:50)	#using all 50 LNs - the max examined
+betax = beta(a,b+xvec)
+betac = betax/beta1
+prob.FN = cbind(1:50,betac)
+prob.FN
+# prob.FN is the probability of FN
+
+# plot for probability of FN
+nodpos = lndata %>% filter(node_status==1)
+returns = seq(0,1,0.1)
+plot(prob.FN,cex.axis=0.9,xlab="Lymph Nodes Examined", col="skyblue3",
+	ylab="Probability of False Negative Lymphadenectomy",yaxt="n",pch=20,xlim=c(0,50))
+axis(2,at=returns,lab=paste(returns*100,"%",sep=""),las=TRUE,cex.axis=0.9)
+
+```
+
+
+```{r}
+# calculating the number of false negative patients
+# find the frequency of each examined nodes positive
+posnod.dist = as.data.frame(table(nodpos[,"REGIONAL_NODES_EXAMINED"]))
+colnames(posnod.dist) = c("num.nodes","posnod.pts")
+#posnod.dist
+
+# merge dataset with probability of FN and frequency of positive nodes
+colnames(prob.FN) = c("num.nodes","prob.FN")
+prob.FN = merge(prob.FN,posnod.dist,by="num.nodes",all=T)
+
+# equation 6
+# number of FN
+# all the positive results are true positive? Is there FP?
+num.FN=as.data.frame(((prob.FN[,"prob.FN"])*prob.FN[,"posnod.pts"])/(1-prob.FN[,"prob.FN"]))
+num.FN = as.data.frame(cbind(seq(1:50),num.FN))
+colnames(num.FN) = c("num.nodes","num.FN")
+
+```
+
+
+```{r}
+# find the number of true negatives
+negpts = lndata %>% filter(node_status==0)
+negnod.dist = as.data.frame(table(negpts[,"REGIONAL_NODES_EXAMINED"]))
+colnames(negnod.dist) = c("num.nodes","negnod.pts")
+
+full.data = merge(prob.FN,negnod.dist,by="num.nodes",all=T)
+full.data = merge(full.data,num.FN,by="num.nodes",all=T)
+
+#!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+# too many of FN > neg
+# until nodes = 17, FN < neg
+
+```
+
+
+```{r}
+#############################################################################
+# if then: if the FN > neg, then FN=neg
+for (i in 1:nrow(full.data)) {
+  if (full.data$num.FN[i] > full.data$negnod.pts[i]){
+    full.data$num.FN[i] = full.data$negnod.pts[i]
+    }
+}
+
+# equation 2
+# got negative values of true negative (solved)
+# for 1 node and 2 nodes
+full.data$num.TN = full.data$negnod.pts - full.data$num.FN
+
+```
+
+
+```{r}
+# calculting apparent prevalence across all patients
+ap.all = lndata %>% group_by(node_status) %>% summarise(n=n()) %>% select(n)
+ap.all = t(ap.all)
+ap.all$aprev = (ap.all[1,2]/(ap.all[1,1]+ap.all[1,2]))
+ap.all = t(as.matrix(ap.all))
+ap.all
+# 0.7421053
+
+
+#calculating corrected prevalence over all patients
+full.data$num.TP = full.data$posnod.pts
+full.data$tot.actpos = full.data$num.FN + full.data$num.TP
+full.data$total = full.data$num.FN + full.data$num.TP + full.data$num.TN
+sum(full.data$total)
+corr.prev.allpts = sum(full.data$tot.actpos)/sum(full.data$total)
+corr.prev.allpts
+# 0.9061488
+
+```
+
+
+```{r}
+# equation 9
+# calculate for the npv and probability of occult LN disease
+full.data$npv = full.data$num.TN / (full.data$num.TN + full.data$num.FN)
+
+full.data$prob.lnd = 1 - full.data$npv
+
+fig_data = full.data
+
+# plot for probability of occult LN disease
+returns = seq(0,1,0.1)
+plot(fig_data$prob.lnd,cex.axis=0.9,xlab="Lymph Nodes Examined", col="skyblue3",
+	ylab="Probability of Occult Lymph Nodes Disease",yaxt="n",pch=20,xlim=c(0,50))
+axis(2,at=returns,lab=paste(returns*100,"%",sep=""),las=TRUE,cex.axis=0.9)
+lines(smooth.spline(seq(1,50),fig_data$prob.lnd), col = "red")
+
+# plot by ggplot2
+ggplot(fig_data, aes(x = num.nodes, y = prob.lnd)) + 
+  geom_point(color = "skyblue3") + xlab("Lymph Nodes Examined") + 
+  ylab("Probability of Occult Lymph Nodes Disease") + 
+  scale_y_continuous(breaks = seq(0, 1, 0.1)) + 
+  stat_smooth(method="gam",formula=y~s(x,k=5),size=1,color="red",se=FALSE)
+
+```
+
+
+
+#########Tonsil##########
+```{r}
+# filter for ICD-O-3 codes on primary site
+# C019, C024, C142
+lndata = lndata %>% filter(cancer_type == "Tonsil")
+# final cohort number = 9548
+
+```
+
+
+```{r}
+# EDA
+h = hist(lndata$REGIONAL_NODES_EXAMINED, main=NULL, xlab="Regional Lymph Nodes Examined",
+         col = "skyblue")
+text(h$mids,h$counts,labels=h$counts, adj=c(0.5, -0.5))
+
+g = hist(lndata$REGIONAL_NODES_POSITIVE, main=NULL, xlab="Regional Lymph Nodes Positive",
+         col = "skyblue")
+text(g$mids,g$counts,labels=g$counts, adj=c(0.5, -0.5))
+
+histogram(lndata$prob_positive, main=NULL, xlab="Probability of Node-Positive",
+         col = "skyblue")
+
+```
+
+
+```{r}
+# generate subsets for positive nodes and examined nodes >= 2
+multnod = lndata %>% filter(node_status==1) %>% filter(REGIONAL_NODES_EXAMINED >= 2)
+
+# subset with variables: id, nodes positive, nodes negative, and nodes examined
+multnod.lnonly = multnod %>% select(PUF_CASE_ID, REGIONAL_NODES_POSITIVE,
+                                    regional_nodes_negative, REGIONAL_NODES_EXAMINED)
+
+subdata = multnod %>% select(REGIONAL_NODES_POSITIVE,regional_nodes_negative,
+                             REGIONAL_NODES_EXAMINED)
+summary(subdata)
+
+```
+
+
+```{r}
+# Create subset of data to use for estimating alpha/betas
+col1 = multnod.lnonly$REGIONAL_NODES_POSITIVE
+col2 = multnod.lnonly$regional_nodes_negative
+totnodes = multnod.lnonly$REGIONAL_NODES_EXAMINED
+trainingdata = cbind(col1,col2)
+
+summary(trainingdata)
+
+```
+
+
+```{r}
+# fitting the beta-binomial model
+# vglm: Fits vector generalized linear models (VGLMs)
+# Parameter1: formula (model to be fit): two column matrix with success & failures
+#           each row is an observation. The use of "~ 1" indicates to fit just an intercept.
+# Parameter2: function of class vglmff describing statistical model to be used
+#           (VGAM family function = betabinomial)
+fit = vglm(trainingdata ~ 1, betabinomialff, trace = TRUE)
+head(fit@misc$rho) # The correlation parameter
+ls(fit@misc)
+head(cbind(depvar(fit), weights(fit, type = "prior")))
+fit
+summary(fit)
+Coef(fit)
+ls(predict(fit,se=TRUE))
+diag(predict(fit,se=TRUE)$se.fit)
+
+```
+
+
+```{r}
+# Calculate stderr for coefficients
+model_stderr = (diag(predict(fit,se=TRUE)$se.fit))
+
+# Report exponentiated coefficents & 95% CI
+model_coef = exp(coef(fit))
+model_mohighCI_coef = exp(coef(fit) + 1.96 * model_stderr)
+model_lowCI_coef = exp(coef(fit) - 1.96 * model_stderr)
+model_coef
+model_mohighCI_coef
+model_lowCI_coef
+
+```
+
+
+```{r}
+# result of a, b and their 95% confidence interval
+ub = model_mohighCI_coef
+lb = model_lowCI_coef
+t = t(t(Coef(fit)))
+
+ab.ci = cbind(t,t(t(lb)),t(t(ub)))
+colnames(ab.ci) = c("val","lb","ub")
+
+# 95% confidence interval for a and b
+rownames(ab.ci) = c("a","b")
+ab.ci
+
+# mean for model
+1.194424/(1.194424+7.223594)
+
+```
+
+
+```{r}
+# calculate the proportion of nodes positive and its mean
+multnod.lnonly[,"prop.pos"] = 
+  multnod.lnonly[,"REGIONAL_NODES_POSITIVE"]/multnod.lnonly[,"REGIONAL_NODES_EXAMINED"]
+mean(multnod.lnonly[,"prop.pos"])
+
+```
+
+
+```{r}
+a = as.numeric(Coef(fit)[1])
+b = as.numeric(Coef(fit)[2])
+beta1 = beta(a,b)
+beta1
+# 0.06239312
+
+# equation 5
+xvec = seq(1:50)	#using all 50 LNs - the max examined
+betax = beta(a,b+xvec)
+betac = betax/beta1
+prob.FN = cbind(1:50,betac)
+prob.FN
+# prob.FN is the probability of FN
+
+# plot for probability of FN
+nodpos = lndata %>% filter(node_status==1)
+returns = seq(0,1,0.1)
+plot(prob.FN,cex.axis=0.9,xlab="Lymph Nodes Examined", col="skyblue3",
+	ylab="Probability of False Negative Lymphadenectomy",yaxt="n",pch=20,xlim=c(0,50))
+axis(2,at=returns,lab=paste(returns*100,"%",sep=""),las=TRUE,cex.axis=0.9)
+
+```
+
+
+```{r}
+# calculating the number of false negative patients
+# find the frequency of each examined nodes positive
+posnod.dist = as.data.frame(table(nodpos[,"REGIONAL_NODES_EXAMINED"]))
+colnames(posnod.dist) = c("num.nodes","posnod.pts")
+#posnod.dist
+
+# merge dataset with probability of FN and frequency of positive nodes
+colnames(prob.FN) = c("num.nodes","prob.FN")
+prob.FN = merge(prob.FN,posnod.dist,by="num.nodes",all=T)
+
+# equation 6
+# number of FN
+# all the positive results are true positive? Is there FP?
+num.FN=as.data.frame(((prob.FN[,"prob.FN"])*prob.FN[,"posnod.pts"])/(1-prob.FN[,"prob.FN"]))
+num.FN = as.data.frame(cbind(seq(1:50),num.FN))
+colnames(num.FN) = c("num.nodes","num.FN")
+
+```
+
+
+```{r}
+# find the number of true negatives
+negpts = lndata %>% filter(node_status==0)
+negnod.dist = as.data.frame(table(negpts[,"REGIONAL_NODES_EXAMINED"]))
+colnames(negnod.dist) = c("num.nodes","negnod.pts")
+
+full.data = merge(prob.FN,negnod.dist,by="num.nodes",all=T)
+full.data = merge(full.data,num.FN,by="num.nodes",all=T)
+
+#!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+# too many of FN > neg
+# until nodes = 17, FN < neg
+
+```
+
+
+```{r}
+#############################################################################
+# if then: if the FN > neg, then FN=neg
+for (i in 1:nrow(full.data)) {
+  if (full.data$num.FN[i] > full.data$negnod.pts[i]){
+    full.data$num.FN[i] = full.data$negnod.pts[i]
+    }
+}
+
+# equation 2
+# got negative values of true negative (solved)
+# for 1 node and 2 nodes
+full.data$num.TN = full.data$negnod.pts - full.data$num.FN
+
+```
+
+
+```{r}
+# calculting apparent prevalence across all patients
+ap.all = lndata %>% group_by(node_status) %>% summarise(n=n()) %>% select(n)
+ap.all = t(ap.all)
+ap.all$aprev = (ap.all[1,2]/(ap.all[1,1]+ap.all[1,2]))
+ap.all = t(as.matrix(ap.all))
+ap.all
+
+
+#calculating corrected prevalence over all patients
+full.data$num.TP = full.data$posnod.pts
+full.data$tot.actpos = full.data$num.FN + full.data$num.TP
+full.data$total = full.data$num.FN + full.data$num.TP + full.data$num.TN
+sum(full.data$total)
+corr.prev.allpts = sum(full.data$tot.actpos)/sum(full.data$total)
+corr.prev.allpts
+
+```
+
+
+```{r}
+# equation 9
+# calculate for the npv and probability of occult LN disease
+full.data$npv = full.data$num.TN / (full.data$num.TN + full.data$num.FN)
+
+full.data$prob.lnd = 1 - full.data$npv
+
+fig_data = full.data
+
+# plot for probability of occult LN disease
+returns = seq(0,1,0.1)
+plot(fig_data$prob.lnd,cex.axis=0.9,xlab="Lymph Nodes Examined", col="skyblue3",
+	ylab="Probability of Occult Lymph Nodes Disease",yaxt="n",pch=20,xlim=c(0,50))
+axis(2,at=returns,lab=paste(returns*100,"%",sep=""),las=TRUE,cex.axis=0.9)
+lines(smooth.spline(seq(1,50),fig_data$prob.lnd), col = "red")
+
+# plot by ggplot2
+ggplot(fig_data, aes(x = num.nodes, y = prob.lnd)) + 
+  geom_point(color = "skyblue3") + xlab("Lymph Nodes Examined") + 
+  ylab("Probability of Occult Lymph Nodes Disease") + 
+  scale_y_continuous(breaks = seq(0, 1, 0.1)) + 
+  stat_smooth(method="gam",formula=y~s(x,k=5),size=1,color="red",se=FALSE)
+
+```
+
+
+
+#########Tongue##########
+```{r}
+# filter for ICD-O-3 codes on primary site
+# C019, C024, C142
+lndata = lndata %>% filter(PRIMARY_SITE %in% c("C019","C024","C142"))
+# final cohort number = 5204
+
+```
+
+
+```{r}
+# EDA
+h = hist(lndata$REGIONAL_NODES_EXAMINED, main=NULL, xlab="Regional Lymph Nodes Examined",
+         col = "skyblue")
+text(h$mids,h$counts,labels=h$counts, adj=c(0.5, -0.5))
+
+g = hist(lndata$REGIONAL_NODES_POSITIVE, main=NULL, xlab="Regional Lymph Nodes Positive",
+         col = "skyblue")
+text(g$mids,g$counts,labels=g$counts, adj=c(0.5, -0.5))
+
+histogram(lndata$prob_positive, main=NULL, xlab="Probability of Node-Positive",
+         col = "skyblue")
+
+```
+
+
+```{r}
+# generate subsets for positive nodes and examined nodes >= 2
+multnod = lndata %>% filter(node_status==1) %>% filter(REGIONAL_NODES_EXAMINED >= 2)
+
+# subset with variables: id, nodes positive, nodes negative, and nodes examined
+multnod.lnonly = multnod %>% select(PUF_CASE_ID, REGIONAL_NODES_POSITIVE,
+                                    regional_nodes_negative, REGIONAL_NODES_EXAMINED)
+
+subdata = multnod %>% select(REGIONAL_NODES_POSITIVE,regional_nodes_negative,
+                             REGIONAL_NODES_EXAMINED)
+summary(subdata)
+
+```
+
+
+```{r}
+# Create subset of data to use for estimating alpha/betas
+col1 = multnod.lnonly$REGIONAL_NODES_POSITIVE
+col2 = multnod.lnonly$regional_nodes_negative
+totnodes = multnod.lnonly$REGIONAL_NODES_EXAMINED
+trainingdata = cbind(col1,col2)
+
+summary(trainingdata)
+
+```
+
+
+```{r}
+# fitting the beta-binomial model
+# vglm: Fits vector generalized linear models (VGLMs)
+# Parameter1: formula (model to be fit): two column matrix with success & failures
+#           each row is an observation. The use of "~ 1" indicates to fit just an intercept.
+# Parameter2: function of class vglmff describing statistical model to be used
+#           (VGAM family function = betabinomial)
+fit = vglm(trainingdata ~ 1, betabinomialff, trace = TRUE)
+head(fit@misc$rho) # The correlation parameter
+ls(fit@misc)
+head(cbind(depvar(fit), weights(fit, type = "prior")))
+fit
+summary(fit)
+Coef(fit)
+ls(predict(fit,se=TRUE))
+diag(predict(fit,se=TRUE)$se.fit)
+
+```
+
+
+```{r}
+# Calculate stderr for coefficients
+model_stderr = (diag(predict(fit,se=TRUE)$se.fit))
+
+# Report exponentiated coefficents & 95% CI
+model_coef = exp(coef(fit))
+model_mohighCI_coef = exp(coef(fit) + 1.96 * model_stderr)
+model_lowCI_coef = exp(coef(fit) - 1.96 * model_stderr)
+model_coef
+model_mohighCI_coef
+model_lowCI_coef
+
+```
+
+
+```{r}
+# result of a, b and their 95% confidence interval
+ub = model_mohighCI_coef
+lb = model_lowCI_coef
+t = t(t(Coef(fit)))
+
+ab.ci = cbind(t,t(t(lb)),t(t(ub)))
+colnames(ab.ci) = c("val","lb","ub")
+
+# 95% confidence interval for a and b
+rownames(ab.ci) = c("a","b")
+ab.ci
+
+# mean for model
+1.467847/(1.467847+10.553704)
+
+```
+
+
+```{r}
+# calculate the proportion of nodes positive and its mean
+multnod.lnonly[,"prop.pos"] = 
+  multnod.lnonly[,"REGIONAL_NODES_POSITIVE"]/multnod.lnonly[,"REGIONAL_NODES_EXAMINED"]
+mean(multnod.lnonly[,"prop.pos"])
+
+```
+
+
+```{r}
+a = as.numeric(Coef(fit)[1])
+b = as.numeric(Coef(fit)[2])
+beta1 = beta(a,b)
+beta1
+# 0.06239312
+
+# equation 5
+xvec = seq(1:50)	#using all 50 LNs - the max examined
+betax = beta(a,b+xvec)
+betac = betax/beta1
+prob.FN = cbind(1:50,betac)
+prob.FN
+# prob.FN is the probability of FN
+
+# plot for probability of FN
+nodpos = lndata %>% filter(node_status==1)
+returns = seq(0,1,0.1)
+plot(prob.FN,cex.axis=0.9,xlab="Lymph Nodes Examined", col="skyblue3",
+	ylab="Probability of False Negative Lymphadenectomy",yaxt="n",pch=20,xlim=c(0,50))
+axis(2,at=returns,lab=paste(returns*100,"%",sep=""),las=TRUE,cex.axis=0.9)
+
+```
+
+
+```{r}
+# calculating the number of false negative patients
+# find the frequency of each examined nodes positive
+posnod.dist = as.data.frame(table(nodpos[,"REGIONAL_NODES_EXAMINED"]))
+colnames(posnod.dist) = c("num.nodes","posnod.pts")
+#posnod.dist
+
+# merge dataset with probability of FN and frequency of positive nodes
+colnames(prob.FN) = c("num.nodes","prob.FN")
+prob.FN = merge(prob.FN,posnod.dist,by="num.nodes",all=T)
+
+# equation 6
+# number of FN
+# all the positive results are true positive? Is there FP?
+num.FN=as.data.frame(((prob.FN[,"prob.FN"])*prob.FN[,"posnod.pts"])/(1-prob.FN[,"prob.FN"]))
+num.FN = as.data.frame(cbind(seq(1:50),num.FN))
+colnames(num.FN) = c("num.nodes","num.FN")
+
+```
+
+
+```{r}
+# find the number of true negatives
+negpts = lndata %>% filter(node_status==0)
+negnod.dist = as.data.frame(table(negpts[,"REGIONAL_NODES_EXAMINED"]))
+colnames(negnod.dist) = c("num.nodes","negnod.pts")
+
+full.data = merge(prob.FN,negnod.dist,by="num.nodes",all=T)
+full.data = merge(full.data,num.FN,by="num.nodes",all=T)
+
+#!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+# too many of FN > neg
+# until nodes = 17, FN < neg
+
+```
+
+
+```{r}
+#############################################################################
+# if then: if the FN > neg, then FN=neg
+for (i in 1:nrow(full.data)) {
+  if (full.data$num.FN[i] > full.data$negnod.pts[i]){
+    full.data$num.FN[i] = full.data$negnod.pts[i]
+    }
+}
+
+# equation 2
+# got negative values of true negative (solved)
+# for 1 node and 2 nodes
+full.data$num.TN = full.data$negnod.pts - full.data$num.FN
+
+```
+
+
+```{r}
+# calculting apparent prevalence across all patients
+ap.all = lndata %>% group_by(node_status) %>% summarise(n=n()) %>% select(n)
+ap.all = t(ap.all)
+ap.all$aprev = (ap.all[1,2]/(ap.all[1,1]+ap.all[1,2]))
+ap.all = t(as.matrix(ap.all))
+ap.all
+
+
+#calculating corrected prevalence over all patients
+full.data$num.TP = full.data$posnod.pts
+full.data$tot.actpos = full.data$num.FN + full.data$num.TP
+full.data$total = full.data$num.FN + full.data$num.TP + full.data$num.TN
+sum(full.data$total)
+corr.prev.allpts = sum(full.data$tot.actpos)/sum(full.data$total)
+corr.prev.allpts
+
+```
+
+
+```{r}
+# equation 9
+# calculate for the npv and probability of occult LN disease
+full.data$npv = full.data$num.TN / (full.data$num.TN + full.data$num.FN)
+
+full.data$prob.lnd = 1 - full.data$npv
+
+fig_data = full.data
+
+# plot for probability of occult LN disease
+returns = seq(0,1,0.1)
+plot(fig_data$prob.lnd,cex.axis=0.9,xlab="Lymph Nodes Examined", col="skyblue3",
+	ylab="Probability of Occult Lymph Nodes Disease",yaxt="n",pch=20,xlim=c(0,50))
+axis(2,at=returns,lab=paste(returns*100,"%",sep=""),las=TRUE,cex.axis=0.9)
+lines(smooth.spline(seq(1,50),fig_data$prob.lnd), col = "red")
+
+# plot by ggplot2
+ggplot(fig_data, aes(x = num.nodes, y = prob.lnd)) + 
+  geom_point(color = "skyblue3") + xlab("Lymph Nodes Examined") + 
+  ylab("Probability of Occult Lymph Nodes Disease") + 
+  scale_y_continuous(breaks = seq(0, 1, 0.1)) + 
+  stat_smooth(method="gam",formula=y~s(x,k=5),size=1,color="red",se=FALSE)
+
+```

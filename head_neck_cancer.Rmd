@@ -1,0 +1,483 @@
+---
+title: "head_neck_cancer"
+author: "Si Zhou"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+
+```{r}
+library(VGAM)
+library(rtf)
+library(reshape2)
+library(ggplot2)
+library(lattice)
+library(survival)
+library(Hmisc)
+library(rms)
+library(dplyr)
+library(gtsummary)
+
+```
+
+
+```{r}
+# import dataset
+lndata = read.csv("Surgery.csv",header=T,sep=",")
+
+lndata = lndata %>% filter(!(TNM_PATH_M %in% c("c1", "p1")))
+lndata = lndata %>% filter(REGIONAL_NODES_EXAMINED<=50)
+# data year: 2004-2017
+
+dim(lndata)
+# final cohort number = 62673
+
+# EDA
+h = hist(lndata$REGIONAL_NODES_EXAMINED, main=NULL, xlab="Regional Lymph Nodes Examined",
+         col = "skyblue")
+text(h$mids,h$counts,labels=h$counts, adj=c(0.5, -0.5))
+
+g = hist(lndata$REGIONAL_NODES_POSITIVE, main=NULL, xlab="Regional Lymph Nodes Positive",
+         col = "skyblue")
+text(g$mids,g$counts,labels=g$counts, adj=c(0.5, -0.5))
+
+histogram(lndata$prob_positive, main=NULL, xlab="Probability of Node-Positive",
+         col = "skyblue")
+
+table(lndata$cancer_type)
+
+```
+
+
+```{r}
+# histogram of regional nodes examined by different cancer types
+ggplot(data=lndata, aes(x=REGIONAL_NODES_EXAMINED, fill=REGIONAL_NODES_EXAMINED)) +
+  geom_histogram(position="identity", alpha=0.5, 
+                 color = "#00AFBB", fill ="#00AFBB") +
+  theme_minimal() + xlab("Cancer Types") + 
+  ggtitle("Histograms of regional nodes examined by different cancer types") +
+  theme(legend.title = element_blank()) + 
+  facet_wrap(~cancer_type, scales = "free", ncol=3)
+
+
+```
+
+
+```{r}
+# generate subsets for positive nodes and examined nodes >= 2
+multnod = lndata %>% filter(node_status==1) %>% filter(REGIONAL_NODES_EXAMINED >= 2)
+# cohort = 38462
+
+# subset with variables: id, nodes positive, nodes negative, and nodes examined
+multnod.lnonly = multnod %>% select(PUF_CASE_ID, REGIONAL_NODES_POSITIVE,
+                                    regional_nodes_negative, REGIONAL_NODES_EXAMINED)
+
+subdata = multnod %>% select(REGIONAL_NODES_POSITIVE,regional_nodes_negative,
+                             REGIONAL_NODES_EXAMINED)
+summary(subdata)
+
+##########################################################################################
+# remove the outliers in regional nodes positive for 90%
+#Q = quantile(multnod.lnonly_full$REGIONAL_NODES_POSITIVE, probs=c(0, 0.9), na.rm = FALSE)
+#Q
+# 90% is 8
+
+#multnod.lnonly = subset(multnod.lnonly, multnod.lnonly$REGIONAL_NODES_POSITIVE <= Q[2])
+# cohort = 35163
+
+```
+
+
+```{r}
+##########################################################################################
+# remove the outliers in regional nodes examined for 90%
+Q = quantile(multnod.lnonly$REGIONAL_NODES_EXAMINED, probs=c(0, 0.9), na.rm = FALSE)
+Q
+# 90% is 64
+
+#multnod.lnonly = subset(multnod.lnonly, multnod.lnonly$REGIONAL_NODES_EXAMINED <= Q[2])
+# cohort = 34691
+
+```
+
+
+```{r}
+# Create subset of data to use for estimating alpha/betas
+col1 = multnod.lnonly$REGIONAL_NODES_POSITIVE
+col2 = multnod.lnonly$regional_nodes_negative
+totnodes = multnod.lnonly$REGIONAL_NODES_EXAMINED
+trainingdata = cbind(col1,col2)
+
+summary(trainingdata)
+
+```
+
+
+```{r}
+# fitting the beta-binomial model
+# vglm: Fits vector generalized linear models (VGLMs)
+# Parameter1: formula (model to be fit): two column matrix with success & failures
+#           each row is an observation. The use of "~ 1" indicates to fit just an intercept.
+# Parameter2: function of class vglmff describing statistical model to be used
+#           (VGAM family function = betabinomial)
+fit = vglm(trainingdata ~ 1, betabinomialff, trace = TRUE)
+head(fit@misc$rho) # The correlation parameter
+ls(fit@misc)
+head(cbind(depvar(fit), weights(fit, type = "prior")))
+fit
+summary(fit)
+Coef(fit)
+ls(predict(fit,se=TRUE))
+diag(predict(fit,se=TRUE)$se.fit)
+
+```
+
+
+```{r}
+# Calculate stderr for coefficients
+model_stderr = (diag(predict(fit,se=TRUE)$se.fit))
+
+# Report exponentiated coefficents & 95% CI
+model_coef = exp(coef(fit))
+model_mohighCI_coef = exp(coef(fit) + 1.96 * model_stderr)
+model_lowCI_coef = exp(coef(fit) - 1.96 * model_stderr)
+model_coef
+model_mohighCI_coef
+model_lowCI_coef
+
+```
+
+
+```{r}
+# result of a, b and their 95% confidence interval
+ub = model_mohighCI_coef
+lb = model_lowCI_coef
+t = t(t(Coef(fit)))
+
+ab.ci = cbind(t,t(t(lb)),t(t(ub)))
+colnames(ab.ci) = c("val","lb","ub")
+
+# 95% confidence interval for a and b
+rownames(ab.ci) = c("a","b")
+ab.ci
+
+# mean for model
+1.193326/(1.193326+6.878848)
+# 0.147832
+
+```
+
+
+```{r}
+# calculate the proportion of nodes positive and its mean
+multnod.lnonly[,"prop.pos"] = 
+  multnod.lnonly[,"REGIONAL_NODES_POSITIVE"]/multnod.lnonly[,"REGIONAL_NODES_EXAMINED"]
+mean(multnod.lnonly[,"prop.pos"])
+# overall mean of proportion of positive is 0.1621845
+
+weighted.mean(multnod.lnonly[,"prop.pos"],multnod.lnonly[,"REGIONAL_NODES_EXAMINED"])
+# weighted mean of proportion of positive is 0.1229496
+
+```
+
+
+```{r}
+a = as.numeric(Coef(fit)[1])
+b = as.numeric(Coef(fit)[2])
+beta1 = beta(a,b)
+beta1
+# 0.09063578
+
+# equation 5
+xvec = seq(1:50)	#using all 50 LNs - the max examined
+betax = beta(a,b+xvec)
+betac = betax/beta1
+prob.FN = cbind(1:50,betac)
+prob.FN
+# prob.FN is the probability of FN
+
+# plot for probability of FN
+nodpos = lndata %>% filter(node_status==1)
+returns = seq(0,1,0.1)
+plot(prob.FN,cex.axis=0.9,xlab="Lymph Nodes Examined", col="skyblue3",
+	ylab="Probability of False Negative Lymphadenectomy",yaxt="n",pch=20,xlim=c(0,50))
+axis(2,at=returns,lab=paste(returns*100,"%",sep=""),las=TRUE,cex.axis=0.9)
+
+```
+
+
+```{r}
+# calculating the number of false negative patients
+# find the frequency of each examined nodes positive
+posnod.dist = as.data.frame(table(nodpos[,"REGIONAL_NODES_EXAMINED"]))
+colnames(posnod.dist) = c("num.nodes","posnod.pts")
+#posnod.dist
+
+# merge dataset with probability of FN and frequency of positive nodes
+colnames(prob.FN) = c("num.nodes","prob.FN")
+prob.FN = merge(prob.FN,posnod.dist,by="num.nodes",all=T)
+
+# equation 6
+# number of FN
+# all the positive results are true positive? Is there FP?
+num.FN=as.data.frame(((prob.FN[,"prob.FN"])*prob.FN[,"posnod.pts"])/(1-prob.FN[,"prob.FN"]))
+num.FN = as.data.frame(cbind(seq(1:50),num.FN))
+colnames(num.FN) = c("num.nodes","num.FN")
+
+```
+
+
+```{r}
+# find the number of true negatives
+negpts = lndata %>% filter(node_status==0)
+negnod.dist = as.data.frame(table(negpts[,"REGIONAL_NODES_EXAMINED"]))
+colnames(negnod.dist) = c("num.nodes","negnod.pts")
+
+full.data = merge(prob.FN,negnod.dist,by="num.nodes",all=T)
+full.data = merge(full.data,num.FN,by="num.nodes",all=T)
+
+#############################################################################
+# if then: if the FN > neg, then FN=neg
+for (i in 1:nrow(full.data)) {
+  if (full.data$num.FN[i] > full.data$negnod.pts[i]){
+    full.data$num.FN[i] = full.data$negnod.pts[i]
+    }
+}
+
+# equation 2
+# got negative values of true negative (solved)
+# for 1 node and 2 nodes
+full.data$num.TN = full.data$negnod.pts - full.data$num.FN
+
+```
+
+
+```{r}
+# calculting apparent prevalence across all patients
+ap.all = lndata %>% group_by(node_status) %>% summarise(n=n()) %>% select(n)
+ap.all = t(ap.all)
+ap.all$aprev = (ap.all[1,2]/(ap.all[1,1]+ap.all[1,2]))
+ap.all = t(as.matrix(ap.all))
+ap.all
+# 0.5171605
+
+
+#calculating corrected prevalence over all patients
+full.data$num.TP = full.data$posnod.pts
+full.data$tot.actpos = full.data$num.FN + full.data$num.TP
+full.data$total = full.data$num.FN + full.data$num.TP + full.data$num.TN
+sum(full.data$total)
+corr.prev.allpts = sum(full.data$tot.actpos)/sum(full.data$total)
+corr.prev.allpts
+# 0.7074818
+
+```
+
+
+```{r}
+# equation 9
+# calculate for the npv and probability of occult LN disease
+full.data$npv = full.data$num.TN / (full.data$num.TN + full.data$num.FN)
+
+full.data$prob.lnd = 1 - full.data$npv
+
+fig_data = full.data %>% filter(!(num.nodes %in% c(1,2)))
+
+# plot for probability of occult LN disease
+returns = seq(0,1,0.1)
+plot(fig_data$prob.lnd,cex.axis=0.9,xlab="Lymph Nodes Examined", col="skyblue3",
+	ylab="Probability of Occult Lymph Nodes Disease",yaxt="n",pch=20,xlim=c(0,50))
+axis(2,at=returns,lab=paste(returns*100,"%",sep=""),las=TRUE,cex.axis=0.9)
+lines(smooth.spline(seq(3,50),fig_data$prob.lnd), col = "red")
+
+# plot by ggplot2
+ggplot(fig_data, aes(x = num.nodes, y = prob.lnd)) + 
+  geom_point(color = "skyblue3") + xlab("Lymph Nodes Examined") + 
+  ylab("Probability of Occult Lymph Nodes Disease") + 
+  scale_y_continuous(breaks = seq(0, 1, 0.1)) + 
+  stat_smooth(method="gam",formula=y~s(x,k=5),size=1,color="red",se=FALSE)
+
+```
+
+
+```{r fig.width=5, fig.height=3}
+# survival plot
+q_ind = as.data.frame(quantile(fig_data$prob.lnd, probs = c(0.25, 0.5, 0.75)))
+colnames(q_ind) = "quantile"
+
+# 25% = 0.1905186; 50% = 0.2259039; 75% = 0.3605861
+
+sur_dat = lndata %>% select(DX_LASTCONTACT_DEATH_MONTHS,PUF_VITAL_STATUS,
+                            REGIONAL_NODES_EXAMINED, node_status) %>% 
+                      filter(node_status==0) %>%
+                     filter(!(REGIONAL_NODES_EXAMINED %in% c(1,2)))
+
+fig_data = within(fig_data, quartile <- as.integer(cut(prob.lnd, quantile(prob.lnd, probs=0:4/4), include.lowest=TRUE)))
+
+names(sur_dat)[names(sur_dat) == 'REGIONAL_NODES_EXAMINED'] <- 'num.nodes'
+
+sur_dat = left_join(sur_dat, fig_data, by = "num.nodes")
+
+surv<-npsurv(Surv(DX_LASTCONTACT_DEATH_MONTHS,PUF_VITAL_STATUS==0)~
+	quartile,data=sur_dat)
+#summary(surv)
+
+#survplot(surv,col=c("black","red","green","blue"))
+dev.new()
+survplot(surv,col=c("skyblue","red","darkolivegreen","darkorange1"),lty=c(1,1,1,1),
+	xlab="Survival Time (Months)",type="kaplan-meier",
+	label.curves=F,conf="none",n.risk=F,ylab="Survival Probability")
+legend(5,0.25,c("<19%","19-23%","23-36%",">36%"),
+	col=c("skyblue","red","darkolivegreen","darkorange1"),lty=c(1,1,1,1),bty="n")
+legend(-3,0.33,"Probability of Occult Nodal Disease",bty="n")	
+
+
+```
+
+
+```{r}
+# Recode for demographic table
+table_dat = lndata %>% mutate(RACE=na_if(RACE,"99"))
+
+# sex
+table_dat$SEX[table_dat$SEX == 1] = 'Male'
+table_dat$SEX[table_dat$SEX == 2] = 'Female'
+names(table_dat)[names(table_dat) == 'SEX'] <- 'Sex'
+
+# age
+names(table_dat)[names(table_dat) == 'AGE'] <- 'Age at Diagnosis'
+
+# race
+table_dat$RACE[table_dat$RACE == 1] = 'White'
+table_dat$RACE[table_dat$RACE == 2] = 'Black'
+for (i in 1:nrow(table_dat)) {
+  if (!(table_dat$RACE[i] %in% c("White","Black",NA))){
+    table_dat$RACE[i] = "Other"
+    }
+}
+names(table_dat)[names(table_dat) == 'RACE'] <- 'Race'
+
+# nodes examined
+names(table_dat)[names(table_dat) == 'REGIONAL_NODES_EXAMINED'] <- 'Regional Nodes Examined'
+
+# node status
+table_dat$node_status[table_dat$node_status == 0] = 'Node-Negative'
+table_dat$node_status[table_dat$node_status == 1] = 'Node-positive'
+
+```
+
+
+```{r}
+# since the facility location and facility type are confidential for patients under 40, we need to recode and find the facility information by facility id (not confidential for all patients)
+fac_dat = lndata %>% select(FACILITY_LOCATION_CD,FACILITY_TYPE_CD, PUF_FACILITY_ID, 
+                            AGE, PUF_CASE_ID)
+
+# subset data by marginal age 40
+ab40 = fac_dat %>% filter(AGE>=40)
+bl40 = fac_dat %>% filter(AGE<40)   # cohort = 3527
+
+# generate dataset of cross table of facility id and facility type
+ab40_type = as.data.frame(table(ab40$PUF_FACILITY_ID,ab40$FACILITY_TYPE_CD))
+
+for (i in 1:nrow(ab40_type)){
+  if (ab40_type$Freq[i]!=0){
+    ab40_type$fac_type[i] = ab40_type$Var2[i]
+  }
+  else {
+      ab40_type$fac_type[i] = NA
+    }
+}
+# extract unique facility id with facility type values
+ab40_type = ab40_type %>% na.omit() %>% select(Var1,fac_type)
+
+
+####################################################################################
+# generate dataset of cross table of facility id and facility location
+ab40_loc = as.data.frame(table(ab40$PUF_FACILITY_ID,ab40$FACILITY_LOCATION_CD))
+
+for (i in 1:nrow(ab40_loc)){
+  if (ab40_loc$Freq[i]!=0){
+    ab40_loc$fac_loc[i] = ab40_loc$Var2[i]
+  }
+  else {
+      ab40_loc$fac_loc[i] = NA
+    }
+}
+# extract unique facility id with facility location values
+ab40_loc = ab40_loc %>% na.omit() %>% select(Var1,fac_loc)
+
+# merge facility type and location by facility id
+ab40_full = merge(ab40_loc,ab40_type,by="Var1",all=T)
+
+ab40_sort <- ab40_full[order(ab40_full$Var1),]
+bl40_sort <- bl40[order(bl40$PUF_FACILITY_ID),]
+
+colnames(ab40_sort) = c("PUF_FACILITY_ID","fac_loc", "fac_type")
+test = left_join(bl40_sort, ab40_sort, by = "PUF_FACILITY_ID")
+
+ab40$fac_loc = ab40$FACILITY_LOCATION_CD
+ab40$fac_type = ab40$FACILITY_TYPE_CD
+
+fac_new = rbind(test,ab40)
+
+fac_new = fac_new %>% select(PUF_CASE_ID,fac_loc,fac_type)
+
+table_dat = merge(fac_new,table_dat,by="PUF_CASE_ID",all=T)
+
+#########################################################################
+# test match for facility id with ab40 and bl40
+which(!bl40_sort$PUF_FACILITY_ID %in% ab40_sort$PUF_FACILITY_ID)
+# larger dataset in the front, whereas smaller dataset on the behind
+# 6 facility id in dataset with subject below 40 years old are missing
+
+```
+
+
+```{r}
+# facility type
+table_dat$fac_type[table_dat$fac_type == 1] = 'Community Cancer Program'
+table_dat$fac_type[table_dat$fac_type == 2] = 'Comprehensive Community Cancer Program'
+table_dat$fac_type[table_dat$fac_type == 3] = 'Academic/Research Program'
+table_dat$fac_type[table_dat$fac_type == 4] = 'Integrated Network Cancer Program'
+names(table_dat)[names(table_dat) == 'fac_type'] <- 'Facility Type'
+
+# facility location
+table_dat$fac_loc[table_dat$fac_loc == 1] = 'New England'
+table_dat$fac_loc[table_dat$fac_loc == 2] = 'Middle Atlantic'
+table_dat$fac_loc[table_dat$fac_loc == 3] = 'South Atlantic'
+table_dat$fac_loc[table_dat$fac_loc == 4] = 'East North Central'
+table_dat$fac_loc[table_dat$fac_loc == 5] = 'East South Central'
+table_dat$fac_loc[table_dat$fac_loc == 6] = 'West North Central'
+table_dat$fac_loc[table_dat$fac_loc == 7] = 'West South Central'
+table_dat$fac_loc[table_dat$fac_loc == 8] = 'Mountain'
+table_dat$fac_loc[table_dat$fac_loc == 9] = 'Pacific'
+names(table_dat)[names(table_dat) == 'fac_loc'] <- 'Facility Location'
+
+
+table_dat = table_dat %>% select(node_status,Sex,`Age at Diagnosis`,Race,
+                                 `Regional Nodes Examined`,`Facility Type`,
+                                 `Facility Location`)
+
+```
+
+
+```{r}
+# demographic table
+tbl_summary(table_dat, by = node_status,      # separate groups in column
+    statistic = list(all_continuous() ~ "{mean} ({sd})"),  
+    missing = "ifany" ) %>%
+  add_n() %>%      # add count without NA
+  add_p() %>%      # add p-values
+  add_overall() %>%
+  modify_header(label = "**Variable**") %>%    # add header for the table
+  bold_labels()         # bold labels
+
+```
+
